@@ -167,7 +167,7 @@ typedef int             Int32;
 typedef unsigned int    UInt32;
 typedef short           Int16;
 typedef unsigned short  UInt16;
-                                       
+
 #define True  ((Bool)1)
 #define False ((Bool)0)
 
@@ -202,6 +202,7 @@ Int32   opMode;
 Int32   srcMode;
 
 #define FILE_NAME_LEN 1034
+#define BZ2BUFSZ 65536
 
 Int32   longestFileName;
 Char    inName [FILE_NAME_LEN];
@@ -325,13 +326,23 @@ Bool myfeof ( FILE* f )
    return False;
 }
 
+/* fsync fd, return 0 on success */
+static int fsync_fd(int fd) {
+  int ret;
+
+  do {
+     ret = fsync(fd);
+  } while ((ret == -1) && (errno == EINTR));
+  if ((ret == 0) || (errno == EINVAL)) return 0;
+  return 1;
+}
 
 /*---------------------------------------------*/
 static 
 void compressStream ( FILE *stream, FILE *zStream )
 {
    BZFILE* bzf = NULL;
-   UChar   ibuf[5000];
+   UChar   ibuf[BZ2BUFSZ];
    Int32   nIbuf;
    UInt32  nbytes_in_lo32, nbytes_in_hi32;
    UInt32  nbytes_out_lo32, nbytes_out_hi32;
@@ -352,7 +363,7 @@ void compressStream ( FILE *stream, FILE *zStream )
    while (True) {
 
       if (myfeof(stream)) break;
-      nIbuf = fread ( ibuf, sizeof(UChar), 5000, stream );
+      nIbuf = fread ( ibuf, sizeof(UChar), BZ2BUFSZ, stream );
       if (ferror(stream)) goto errhandler_io;
       if (nIbuf > 0) BZ2_bzWrite ( &bzerr, bzf, (void*)ibuf, nIbuf );
       if (bzerr != BZ_OK) goto errhandler;
@@ -368,12 +379,14 @@ void compressStream ( FILE *stream, FILE *zStream )
    ret = fflush ( zStream );
    if (ret == EOF) goto errhandler_io;
    if (zStream != stdout) {
+      int fret;
       Int32 fd = fileno ( zStream );
       if (fd < 0) goto errhandler_io;
       applySavedFileAttrToOutputFile ( fd );
+      fret = fsync_fd(fd);
       ret = fclose ( zStream );
       outputHandleJustInCase = NULL;
-      if (ret == EOF) goto errhandler_io;
+      if ((ret == EOF) || (fret != 0)) goto errhandler_io;
    }
    outputHandleJustInCase = NULL;
    if (ferror(stream)) goto errhandler_io;
@@ -436,11 +449,12 @@ Bool uncompressStream ( FILE *zStream, FILE *stream )
 {
    BZFILE* bzf = NULL;
    Int32   bzerr, bzerr_dummy, ret, nread, streamNo, i;
-   UChar   obuf[5000];
+   UChar   obuf[BZ2BUFSZ];
    UChar   unused[BZ_MAX_UNUSED];
    Int32   nUnused;
    void*   unusedTmpV;
    UChar*  unusedTmp;
+   Int32   fd = -1;
 
    nUnused = 0;
    streamNo = 0;
@@ -461,7 +475,7 @@ Bool uncompressStream ( FILE *zStream, FILE *stream )
       streamNo++;
 
       while (bzerr == BZ_OK) {
-         nread = BZ2_bzRead ( &bzerr, bzf, obuf, 5000 );
+         nread = BZ2_bzRead ( &bzerr, bzf, obuf, BZ2BUFSZ);
          if (bzerr == BZ_DATA_ERROR_MAGIC) goto trycat;
          if ((bzerr == BZ_OK || bzerr == BZ_STREAM_END) && nread > 0)
             fwrite ( obuf, sizeof(UChar), nread, stream );
@@ -484,7 +498,7 @@ Bool uncompressStream ( FILE *zStream, FILE *stream )
    closeok:
    if (ferror(zStream)) goto errhandler_io;
    if (stream != stdout) {
-      Int32 fd = fileno ( stream );
+      fd = fileno ( stream );
       if (fd < 0) goto errhandler_io;
       applySavedFileAttrToOutputFile ( fd );
    }
@@ -495,9 +509,11 @@ Bool uncompressStream ( FILE *zStream, FILE *stream )
    ret = fflush ( stream );
    if (ret != 0) goto errhandler_io;
    if (stream != stdout) {
+      int fret = 0;
+      if (fd != -1) fret = fsync_fd(fd);
       ret = fclose ( stream );
       outputHandleJustInCase = NULL;
-      if (ret == EOF) goto errhandler_io;
+      if ((ret == EOF) || (fret != 0)) goto errhandler_io;
    }
    outputHandleJustInCase = NULL;
    if (verbosity >= 2) fprintf ( stderr, "\n    " );
@@ -508,7 +524,7 @@ Bool uncompressStream ( FILE *zStream, FILE *stream )
       rewind(zStream);
       while (True) {
       	 if (myfeof(zStream)) break;
-      	 nread = fread ( obuf, sizeof(UChar), 5000, zStream );
+      	 nread = fread ( obuf, sizeof(UChar), BZ2BUFSZ, zStream );
       	 if (ferror(zStream)) goto errhandler_io;
       	 if (nread > 0) fwrite ( obuf, sizeof(UChar), nread, stream );
       	 if (ferror(stream)) goto errhandler_io;
@@ -557,7 +573,7 @@ Bool testStream ( FILE *zStream )
 {
    BZFILE* bzf = NULL;
    Int32   bzerr, bzerr_dummy, ret, streamNo, i;
-   UChar   obuf[5000];
+   UChar   obuf[BZ2BUFSZ];
    UChar   unused[BZ_MAX_UNUSED];
    Int32   nUnused;
    void*   unusedTmpV;
@@ -579,7 +595,7 @@ Bool testStream ( FILE *zStream )
       streamNo++;
 
       while (bzerr == BZ_OK) {
-         BZ2_bzRead ( &bzerr, bzf, obuf, 5000 );
+         BZ2_bzRead ( &bzerr, bzf, obuf, BZ2BUFSZ);
          if (bzerr == BZ_DATA_ERROR_MAGIC) goto errhandler;
       }
       if (bzerr != BZ_STREAM_END) goto errhandler;
